@@ -1,0 +1,143 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <ESP8266HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+
+// WiFi Credentials
+const char* ssid = "yourSSID";
+const char* password = "yourPASSWORD";
+
+// ExchangeRate-API URL
+const char* api_url = "https://v6.exchangerate-api.com/v6/f584e9550bffb7f902203449/latest/USD";
+
+// LCD Pin Definitions
+#define TFT_CS   D2
+#define TFT_RST  D4
+#define TFT_DC   D3
+
+// Create LCD object
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+// Variables for API data
+float rateEUR = 0.0, rateGBP = 0.0, rateZAR = 0.0;
+char lastUpdate[50] = "N/A";
+
+// Page management
+int currentPage = 0; // 0: Rates, 1: Last Update
+unsigned long lastPageFlip = 0;
+const unsigned long pageFlipInterval = 5000; // Flip every 5 seconds
+
+void setup() {
+  Serial.begin(115200);
+
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  Serial.println("Connecting to WiFi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected!");
+
+  // Initialize LCD
+  tft.init(135, 240);  // 240x240 resolution
+  tft.setRotation(3);  // Adjust orientation
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(ST77XX_GREEN);
+  tft.setTextSize(2);
+
+  // Display initial message
+  tft.setCursor(10, 10);
+  tft.println("Fetching Rates...");
+}
+
+void loop() {
+  // Fetch exchange rates every minute
+  static unsigned long lastUpdateMillis = 0;
+  if (millis() - lastUpdateMillis >= 60000 || lastUpdateMillis == 0) {
+    fetchExchangeRates();
+    lastUpdateMillis = millis();
+  }
+
+  // Handle page flipping
+  if (millis() - lastPageFlip >= pageFlipInterval) {
+    currentPage = (currentPage + 1) % 2; // Alternate between 0 and 1
+    displayPage(currentPage);
+    lastPageFlip = millis();
+  }
+}
+
+// Variables for date and time
+char updateDate[20] = "N/A"; // Holds "Mon, 25 Nov 2024"
+char updateTime[20] = "N/A"; // Holds "00:00:01 +0000"
+
+void fetchExchangeRates() {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setInsecure(); // Skip SSL validation
+
+    HTTPClient http;
+    http.begin(client, api_url);
+
+    int httpCode = http.GET();
+    if (httpCode > 0) {
+      String payload = http.getString();
+      Serial.println("Response:");
+      Serial.println(payload);
+
+      // Parse JSON
+      StaticJsonDocument<2048> doc;
+      DeserializationError error = deserializeJson(doc, payload);
+      if (error) {
+        Serial.print("JSON deserialization failed: ");
+        Serial.println(error.f_str());
+        return;
+      }
+
+      // Extract rates
+      rateEUR = doc["conversion_rates"]["EUR"];
+      rateGBP = doc["conversion_rates"]["GBP"];
+      rateZAR = doc["conversion_rates"]["ZAR"]; // Add USD -> ZAR rate
+
+      // Extract and split the update time into date and time
+      const char* lastUpdateStr = doc["time_last_update_utc"];
+      strncpy(updateDate, lastUpdateStr, 16); // Extracts "Mon, 25 Nov 2024"
+      updateDate[16] = '\0';                 // Null-terminate the string
+      strncpy(updateTime, lastUpdateStr + 17, 20); // Extracts "00:00:01 +0000"
+    } else {
+      Serial.printf("HTTP Error: %s\n", http.errorToString(httpCode).c_str());
+    }
+    http.end();
+  } else {
+    Serial.println("WiFi not connected.");
+  }
+}
+  
+void displayPage(int page) {
+  tft.fillScreen(ST77XX_BLACK); // Clear screen
+
+  if (page == 0) {
+    // Page 1: Exchange Rates
+    tft.setCursor(10, 10);
+    tft.println("Exchange Rates:");
+    tft.setCursor(10, 40);
+    tft.print("USD -> EUR: ");
+    tft.println(rateEUR, 2);
+    tft.setCursor(10, 70);
+    tft.print("USD -> GBP: ");
+    tft.println(rateGBP, 2);
+    tft.setCursor(10, 100); // Add space for USD -> ZAR
+    tft.print("USD -> ZAR: ");
+    tft.println(rateZAR, 2); // Display USD -> ZAR rate
+  } else if (page == 1) {
+    // Page 2: Last Update
+    tft.setCursor(10, 10);
+    tft.println("Last Update:");
+    tft.setCursor(10, 50); // Adjust for spacing
+    tft.println(updateDate); // Display the date
+    tft.setCursor(10, 90); // Space for time
+    tft.println(updateTime); // Display the time
+  }
+}
